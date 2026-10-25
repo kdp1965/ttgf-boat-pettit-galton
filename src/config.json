@@ -23,6 +23,17 @@
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
   "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
 
+  "//": "GF180 slow corner: repair timing again on global-route parasitics, and keep the",
+  "//": "resizer from using the slow dly* cells as fanout/wire buffers (they were ~4ns each).",
+  "RUN_POST_GRT_RESIZER_TIMING": 1,
+  "RUN_POST_GRT_DESIGN_REPAIR": 1,
+  "EXTRA_EXCLUDED_CELLS": [
+    "gf180mcu_fd_sc_mcu7t5v0__dlya_*",
+    "gf180mcu_fd_sc_mcu7t5v0__dlyb_*",
+    "gf180mcu_fd_sc_mcu7t5v0__dlyc_*",
+    "gf180mcu_fd_sc_mcu7t5v0__dlyd_*"
+  ],
+
   "//": "RUN_LINTER, LINTER_INCLUDE_PDK_MODELS - Disabling the linter is not recommended!",
   "RUN_LINTER": 1,
   "LINTER_INCLUDE_PDK_MODELS": 1,

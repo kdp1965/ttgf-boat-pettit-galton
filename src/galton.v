@@ -170,6 +170,7 @@ module tt_um_pettit_galton
     reg              faster_p1;
     reg              slower_p1;
     reg [12:0]       rom_addr;
+    reg [12:0]       rom_addr_lead;
     wire [1:0]       rom_color;
     reg  [1:0]       rom_color_r;
     wire             name_pix;
@@ -257,6 +258,26 @@ module tt_um_pettit_galton
 
     assign deflect_trigger = (phase == PH_FALL) && (stage < 4'd12) && at_target && (ball_y >= next_touch_y);
     wire land_trigger      = (phase == PH_FALL) && (stage == 4'd12) && at_target && (ball_y >= landing_y);
+
+    // Registered landing lookup.  Everything feeding it (ball_x, ball_y,
+    // stage, phase, target_x_pix, hist*) only changes on an FSM tick
+    // (frame_end / half / quarter / insane, all on line 524 and at least
+    // 7 clocks apart), so these one-clock-late copies are always current
+    // when the FSM samples them, and the bin mux, landing compare and
+    // increment get a cycle of their own.
+    reg        land_trigger_r;
+    reg  [3:0] land_bin;
+    reg  [9:0] land_next_hist;
+    reg  [9:0] land_y;
+    reg        land_full;
+
+    always @(posedge clk) begin
+        land_trigger_r <= land_trigger;
+        land_bin       <= bin_idx;
+        land_next_hist <= next_hist;
+        land_y         <= landing_y;
+        land_full      <= (cur_hist == 10'h3be);
+    end
     wire faster            = gamepad_up | ui_in[1];
     wire slower            = gamepad_down | ui_in[2];
 
@@ -374,27 +395,27 @@ module tt_um_pettit_galton
                         end else begin
                             pitch_idx <= 4'd0;
                         end
-                    end else if (land_trigger) begin
+                    end else if (land_trigger_r) begin
                         // Ball has exited the peg field ... decide a bin
-                        case (bin_idx)
-                            4'd0:  hist0  <= next_hist[6:0];
-                            4'd1:  hist1  <= next_hist[6:0];
-                            4'd2:  hist2  <= next_hist[7:0];
-                            4'd3:  hist3  <= next_hist;
-                            4'd4:  hist4  <= next_hist;
-                            4'd5:  hist5  <= next_hist;
-                            4'd6:  hist6  <= next_hist;
-                            4'd7:  hist7  <= next_hist;
-                            4'd8:  hist8  <= next_hist;
-                            4'd9:  hist9  <= next_hist;
-                            4'd10: hist10 <= next_hist[7:0];
-                            4'd11: hist11 <= next_hist[6:0];
-                            default: hist12 <= next_hist[6:0];
+                        case (land_bin)
+                            4'd0:  hist0  <= land_next_hist[6:0];
+                            4'd1:  hist1  <= land_next_hist[6:0];
+                            4'd2:  hist2  <= land_next_hist[7:0];
+                            4'd3:  hist3  <= land_next_hist;
+                            4'd4:  hist4  <= land_next_hist;
+                            4'd5:  hist5  <= land_next_hist;
+                            4'd6:  hist6  <= land_next_hist;
+                            4'd7:  hist7  <= land_next_hist;
+                            4'd8:  hist8  <= land_next_hist;
+                            4'd9:  hist9  <= land_next_hist;
+                            4'd10: hist10 <= land_next_hist[7:0];
+                            4'd11: hist11 <= land_next_hist[6:0];
+                            default: hist12 <= land_next_hist[6:0];
                         endcase
                         pause_count <= 0;
                         far_out <= 1'b0;
-                        phase <= (cur_hist == 10'h3be) ? PH_PLONG : PH_PSHRT;
-                        ball_y <= (cur_hist == 10'h3be) ? 0 : landing_y;             // snap to landing y
+                        phase <= land_full ? PH_PLONG : PH_PSHRT;
+                        ball_y <= land_full ? 0 : land_y;             // snap to landing y
 
                         // Ball count ... BCD increment with wrap at 9999
                         if (drop_bcd[3:0] == 4'd9) begin
@@ -467,14 +488,32 @@ module tt_um_pettit_galton
                 default: phase <= PH_FALL;
                 endcase
             end
-            else if (v_count < 133) begin
-                // Register the ROM address
-                if (h_count < 90)
-                    rom_addr <= rom_addr + 1;
-                else if (v_count == 93)
-                    rom_addr <= 0;
+        end
+    end
+
+    // ---------------------------------------------------------------
+    //  ROM address.  rom_addr_lead runs one clock ahead of rom_addr
+    //  (it steps on the next pixel's h/v) so the pipelined ROMs can
+    //  start their lookup a cycle early and still deliver rom_color
+    //  for rom_addr in the same cycle as an unpipelined ROM would.
+    // ---------------------------------------------------------------
+    wire       h_last = (h_count == 799);
+    wire [9:0] h_next = h_last ? 10'd0 : h_count + 10'd1;
+    wire [9:0] v_next = !h_last ? v_count : (v_count == 524) ? 10'd0 : v_count + 10'd1;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            rom_addr_lead <= 0;
+            rom_addr      <= 0;
+        end else begin
+            rom_addr <= rom_addr_lead;
+            if (v_next < 133) begin
+                if (h_next < 90)
+                    rom_addr_lead <= rom_addr_lead + 1;
+                else if (v_next == 93)
+                    rom_addr_lead <= 0;
             end else
-                rom_addr <= 0;
+                rom_addr_lead <= 0;
         end
     end
 
@@ -783,19 +822,23 @@ module tt_um_pettit_galton
     // ===============================================================
     // Instantiate the Galton bitmap
     // ===============================================================
-    galton_rom rom1
+    galton_rom_pipe rom1
     (
-        .addr ( rom_addr  ),
-        .out  ( rom_color )
+        .clk          ( clk                 ),
+        .addr_lo_lead ( rom_addr_lead[7:0]  ),
+        .addr_hi      ( rom_addr[12:8]      ),
+        .out          ( rom_color           )
     );
 
     // ===============================================================
     // Instantiate the "Sir Francis Galton" bitmap
     // ===============================================================
-    name_rom rom2
+    name_rom_pipe rom2
     (
-        .addr ( rom_addr[11:0] ),
-        .out  ( name_pix       )
+        .clk          ( clk                 ),
+        .addr_lo_lead ( rom_addr_lead[7:0]  ),
+        .addr_hi      ( rom_addr[11:8]      ),
+        .out          ( name_pix            )
     );
 
     // ===============================================================
